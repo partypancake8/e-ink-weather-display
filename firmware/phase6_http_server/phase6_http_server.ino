@@ -67,6 +67,9 @@ static const char*    LOG_FILE          = "/log.csv";
 // On breach the board logs a final entry and enters deep sleep indefinitely.
 static const float    BATT_CUTOFF_V     = 3.30f;
 
+// ---- BOOT button (GPIO0, active-low) ----
+static const uint8_t  BUTTON_PIN        = 0;   // single press → deep sleep; press again → wake
+
 // ---- Peripherals ----
 Adafruit_NeoPixel pixel(NEOPIXEL_NUM, PIN_NEOPIXEL, NEO_GRB + NEO_KHZ800);
 Adafruit_SHT4x    sht4;
@@ -268,6 +271,48 @@ void undervoltageShutdown() {
   // Deep sleep indefinitely — wakes only on reset/USB power plug
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
   esp_deep_sleep_start();
+}
+
+// ---- Button-initiated deep sleep ----
+// Logs a SLEEP sentinel, blinks yellow 3×, then enters deep sleep.
+// ext0 wakeup on GPIO0 (LOW) means the next BOOT press will wake the board.
+void buttonSleep() {
+  Serial.println("[BUTTON] Sleep requested — shutting down cleanly.");
+  if (fsOK) {
+    File f = LittleFS.open(LOG_FILE, "a");
+    if (f) {
+      f.printf("%lu,SLEEP,%.3f,%.1f,button\n",
+        (unsigned long)latest.uptime, latest.battV, latest.battPct);
+      f.close();
+    }
+    LittleFS.end();
+  }
+  // 3 yellow blinks = going to sleep
+  for (int i = 0; i < 3; i++) {
+    pixel.setPixelColor(0, pixel.Color(180, 120, 0)); pixel.show(); delay(200);
+    pixel.clear(); pixel.show(); delay(150);
+  }
+  pixel.clear(); pixel.show();
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)BUTTON_PIN, 0);
+  Serial.println("[BUTTON] Entering deep sleep. Press BOOT to wake.");
+  delay(100);
+  esp_deep_sleep_start();
+}
+
+// Debounced check — call every loop iteration.
+void checkButton() {
+  static uint32_t pressStart = 0;
+  static bool     wasPressed  = false;
+  bool pressed = (digitalRead(BUTTON_PIN) == LOW);
+  if (pressed && !wasPressed) {
+    pressStart = millis();
+    wasPressed = true;
+  } else if (!pressed && wasPressed) {
+    wasPressed = false;
+    if (millis() - pressStart >= 50) {  // 50 ms debounce
+      buttonSleep();  // does not return
+    }
+  }
 }
 
 // ================================================================
@@ -732,6 +777,10 @@ void setup() {
 
   initNeoPixel();
   Wire.begin();
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0) {
+    Serial.println("[BUTTON] Woke from deep sleep via BOOT button.");
+  }
 
   Serial.println();
   Serial.println("================================================");
@@ -764,6 +813,7 @@ void loop() {
 
   // ---- LED ----
   updateLed();
+  checkButton();
 
   // ---- Sensor read every READ_INTERVAL_MS ----
   static uint32_t lastRead = 0;

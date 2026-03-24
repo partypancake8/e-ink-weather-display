@@ -32,39 +32,47 @@ Build a battery-powered, Wi-Fi-connected sensor node that reads temperature and 
 
 ### Key Design Decisions
 
-| Decision | Rationale |
-|---|---|
-| HTTPClient + Update (raw) instead of HTTPUpdate library | HTTPUpdate swallows errors silently — raw gives us the exact error string via `/ota-error` |
-| Pull OTA (board fetches from Mac) | Push OTA (ArduinoOTA) requires direct TCP from Mac → board, blocked by AP client isolation on most routers |
-| `min_spiffs` partition scheme | Default TinyUF2 partition has no OTA slot — `min_spiffs` gives 1.9 MB app + OTA + 128 KB SPIFFS |
-| `serve_ota.py` custom server | Logs exact byte count per transfer; confirms full binary was received before board reboots |
-| 2s read interval | Balances sensor responsiveness vs. ESP32 HTTP server latency |
-| Rolling 10-sample avg | Smooths SHT45 noise without introducing lag visible to the user |
+| Decision                                                | Rationale                                                                                                  |
+| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| HTTPClient + Update (raw) instead of HTTPUpdate library | HTTPUpdate swallows errors silently — raw gives us the exact error string via `/ota-error`                 |
+| Pull OTA (board fetches from Mac)                       | Push OTA (ArduinoOTA) requires direct TCP from Mac → board, blocked by AP client isolation on most routers |
+| `min_spiffs` partition scheme                           | Default TinyUF2 partition has no OTA slot — `min_spiffs` gives 1.9 MB app + OTA + 128 KB SPIFFS            |
+| `serve_ota.py` custom server                            | Logs exact byte count per transfer; confirms full binary was received before board reboots                 |
+| 2s read interval                                        | Balances sensor responsiveness vs. ESP32 HTTP server latency                                               |
+| Rolling 10-sample avg                                   | Smooths SHT45 noise without introducing lag visible to the user                                            |
 
 ---
 
 ## Development Phases
 
 ### Phase 0 — I²C Bus Scan (`validation/phase0_i2c_scan`)
+
 Confirmed SHT45 (0x44) and MAX17048 (0x36) addressable on the default I²C bus.
 
 ### Phase 1 — SHT45 Baseline (`validation/phase1_sht45`)
+
 Validated SHT45 reads at high precision mode. Established °C → °F conversion.
 
 ### Phase 2 — Battery Gauge (`validation/phase2_battery`)
+
 Confirmed MAX17048 cellPercent() and cellVoltage() are stable. Defined LOW (20%) and CRITICAL (10%) thresholds.
 
 ### Phase 3 — Wi-Fi (`validation/phase3_wifi`)
+
 Brought up WIFI_STA mode, confirmed DHCP assignment, built first `/data` JSON endpoint.
 
 ### Phase 4 — Combined Sensor + Wi-Fi (`validation/phase4_final`)
+
 Merged phases 1–3. Confirmed sensors readable while HTTP server handles concurrent requests.
 
 ### Phase 5 — NeoPixel LED State Machine (`validation/phase5_status_leds`)
+
 Implemented non-blocking LED state machine (breathe, heartbeat, blink patterns) covering all operational states. Validated no `delay()` calls block the HTTP server.
 
 ### Phase 6 — Production Firmware (`firmware/phase6_http_server`) ✅ current
+
 Full feature set:
+
 - SHT45 + MAX17048 + NeoPixel LED state machine
 - `/` dashboard with live canvas temperature graph
 - `/data` JSON with `tempFAvg` rolling average
@@ -75,6 +83,7 @@ Full feature set:
 - 2s read interval, 10-sample rolling average
 
 ### Phase 7 — OTA Diagnostic (`validation/phase7_ota_test`)
+
 Isolated HTTP OTA test sketch used to prove the OTA mechanism worked before integrating into Phase 6. Kept for reference.
 
 ---

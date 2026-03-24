@@ -39,6 +39,7 @@
 #include <WebServer.h>
 #include <HTTPClient.h>
 #include <Update.h>
+#include <LittleFS.h>
 #include <Adafruit_NeoPixel.h>
 #include <Adafruit_SHT4x.h>
 #include <Adafruit_MAX1704X.h>
@@ -50,11 +51,21 @@ const char* WIFI_SSID     = "FBI Van";
 const char* WIFI_PASSWORD = "sambearrosie";
 // ================================================================
 
-static const uint32_t READ_INTERVAL_MS = 2000;
+static const uint32_t READ_INTERVAL_MS  = 2000;
 static const uint8_t  TEMP_AVG_SAMPLES  = 10;
-static const float    BATT_LOW_PCT     = 20.0f;
-static const float    BATT_CRIT_PCT    = 10.0f;
-static const uint16_t HTTP_PORT        = 80;
+static const float    BATT_LOW_PCT      = 20.0f;
+static const float    BATT_CRIT_PCT     = 10.0f;
+static const uint16_t HTTP_PORT         = 80;
+
+// ---- Data logging ----
+static const uint32_t LOG_INTERVAL_MS   = 15UL * 60UL * 1000UL; // 15 minutes
+static const uint32_t LOG_MAX_BYTES     = 60000;                  // ~1000 entries; rotate when exceeded
+static const char*    LOG_FILE          = "/log.csv";
+
+// ---- Under-voltage protection ----
+// LiPo cells degrade below 3.3 V; below 3.0 V permanent damage is possible.
+// On breach the board logs a final entry and enters deep sleep indefinitely.
+static const float    BATT_CUTOFF_V     = 3.30f;
 
 // ---- Peripherals ----
 Adafruit_NeoPixel pixel(NEOPIXEL_NUM, PIN_NEOPIXEL, NEO_GRB + NEO_KHZ800);
@@ -78,6 +89,7 @@ static SensorData latest;
 static volatile bool otaInProgress = false;  // set during HTTP OTA to pause sensors
 static          uint8_t otaBrightness = 20;    // written by OTA progress callback
 static          String  otaLastError  = "none"; // last OTA error, readable via /ota-error
+static          bool    fsOK          = false;  // LittleFS mounted successfully
 
 // ================================================================
 // LED (same state machine as Phase 5)
@@ -85,7 +97,8 @@ static          String  otaLastError  = "none"; // last OTA error, readable via 
 enum LedState {
   LED_BOOTING, LED_WIFI_CONNECTING, LED_WIFI_CONNECTED,
   LED_HEALTHY, LED_WIFI_LOST, LED_BATT_LOW, LED_BATT_CRITICAL,
-  LED_OTA_PROGRESS  // blue breathe during OTA flash
+  LED_OTA_PROGRESS,    // blue solid during OTA flash
+  LED_UNDERVOLTAGE     // solid dim red — going to deep sleep
 };
 static LedState  ledState    = LED_BOOTING;
 static uint32_t  ledTimer    = 0;
@@ -169,7 +182,92 @@ void updateLed() {
     case LED_OTA_PROGRESS: {
       pixel.setPixelColor(0, col(0, 0, otaBrightness)); pixel.show(); break;
     }
+    case LED_UNDERVOLTAGE: {
+      // Solid dim red — held here until deep sleep triggers
+      pixel.setPixelColor(0, col(60, 0, 0)); pixel.show(); break;
+    }
   }
+}
+
+// ================================================================
+// Filesystem / logging
+// ================================================================
+
+void initFS() {
+  Serial.print("[FS]      ");
+  if (!LittleFS.begin(true)) {   // true = format on failure
+    Serial.println("LittleFS mount FAILED.");
+    return;
+  }
+  fsOK = true;
+  // Print existing log size
+  if (LittleFS.exists(LOG_FILE)) {
+    File f = LittleFS.open(LOG_FILE, "r");
+    Serial.printf("LittleFS OK  (log: %u bytes, %u entries)\n",
+      (unsigned)f.size(), (unsigned)(f.size() / 50));
+    f.close();
+  } else {
+    // Write CSV header on first boot
+    File f = LittleFS.open(LOG_FILE, "w");
+    if (f) { f.println("uptime_s,tempF,humidity,battV,battPct,rssi"); f.close(); }
+    Serial.println("LittleFS OK  (new log created)");
+  }
+}
+
+void logReading() {
+  if (!fsOK) return;
+
+  // Rotate log if it has grown too large (delete oldest half)
+  File check = LittleFS.open(LOG_FILE, "r");
+  bool tooLarge = check && (check.size() >= LOG_MAX_BYTES);
+  if (check) check.close();
+  if (tooLarge) {
+    // Simple rotation: delete the file and start fresh
+    // (history graph will start over; data is also downloadable via /history.csv)
+    LittleFS.remove(LOG_FILE);
+    File f = LittleFS.open(LOG_FILE, "w");
+    if (f) { f.println("uptime_s,tempF,humidity,battV,battPct,rssi"); f.close(); }
+    Serial.println("[LOG] Rotated (file exceeded limit)");
+  }
+
+  File f = LittleFS.open(LOG_FILE, "a");
+  if (!f) { Serial.println("[LOG] Open failed"); return; }
+  f.printf("%lu,%.2f,%.2f,%.3f,%.1f,%d\n",
+    (unsigned long)latest.uptime,
+    latest.tempF, latest.humidity,
+    latest.battV, latest.battPct,
+    latest.rssi);
+  f.close();
+  Serial.printf("[LOG] Entry written (uptime=%lu s)\n", (unsigned long)latest.uptime);
+}
+
+// ================================================================
+// Under-voltage protection
+// ================================================================
+
+void undervoltageShutdown() {
+  Serial.printf("[UNDERVOLTAGE] %.3f V < %.2f V threshold — shutting down.\n",
+    latest.battV, BATT_CUTOFF_V);
+
+  // Log a final sentinel entry before sleeping
+  if (fsOK) {
+    File f = LittleFS.open(LOG_FILE, "a");
+    if (f) {
+      f.printf("%lu,SHUTDOWN,%.3f,%.1f,---\n",
+        (unsigned long)latest.uptime, latest.battV, latest.battPct);
+      f.close();
+    }
+    LittleFS.end();
+  }
+
+  setLedState(LED_UNDERVOLTAGE);
+  updateLed();
+  delay(3000);          // hold red LED so user sees it
+  pixel.clear(); pixel.show();
+
+  // Deep sleep indefinitely — wakes only on reset/USB power plug
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+  esp_deep_sleep_start();
 }
 
 // ================================================================
@@ -201,6 +299,7 @@ void handleRoot() {
        background:#4caf50;margin-right:.4rem;animation:pulse 2s infinite;}
   @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.3;}}
   .graph-wrap{margin-top:1.2rem;}
+  .graph-label{font-size:.7rem;color:#555;margin:0.3rem 0 0.25rem;}
   canvas{width:100%;height:auto;display:block;border-radius:6px;background:#161616;}
 </style>
 </head>
@@ -219,7 +318,10 @@ void handleRoot() {
     <tr><td>Reading #</td>    <td id="reading">—</td></tr>
   </table>
   <div class="graph-wrap">
+    <div class="graph-label">Live — last 60 readings (~2 min)</div>
     <canvas id="tempGraph" width="420" height="150"></canvas>
+    <div class="graph-label" style="margin-top:.7rem">History — logged every 15 min (persisted to flash)</div>
+    <canvas id="histGraph" width="420" height="150"></canvas>
   </div>
   <div id="status">fetching...</div>
 </div>
@@ -229,19 +331,19 @@ void handleRoot() {
   html += R"rawhtml(;
   const MAX_PTS = 60;
   let history = [];
-  function drawGraph(){
-    const c=document.getElementById('tempGraph');
+  function drawCanvas(canvasId, pts, label, color){
+    const c=document.getElementById(canvasId);
     if(!c)return;
     const ctx=c.getContext('2d');
     const W=c.width,H=c.height;
     const PL=42,PR=10,PT=10,PB=26;
     const pw=W-PL-PR,ph=H-PT-PB;
     ctx.clearRect(0,0,W,H);
-    if(history.length<2){
+    if(pts.length<2){
       ctx.fillStyle='#555';ctx.font='11px monospace';ctx.textAlign='center';
       ctx.fillText('Collecting data...',W/2,H/2);return;
     }
-    const mn=Math.min(...history)-0.3,mx=Math.max(...history)+0.3,rng=mx-mn||1;
+    const mn=Math.min(...pts)-0.3,mx=Math.max(...pts)+0.3,rng=mx-mn||1;
     ctx.strokeStyle='#2a2a2a';ctx.lineWidth=1;
     for(let i=0;i<=4;i++){
       const y=PT+ph*(1-i/4);
@@ -249,20 +351,35 @@ void handleRoot() {
       ctx.fillStyle='#555';ctx.font='10px monospace';ctx.textAlign='right';
       ctx.fillText((mn+rng*i/4).toFixed(1)+'\u00b0',PL-3,y+3.5);
     }
-    ctx.strokeStyle='#7ec8e3';ctx.lineWidth=2;ctx.lineJoin='round';
+    ctx.strokeStyle=color;ctx.lineWidth=2;ctx.lineJoin='round';
     ctx.beginPath();
-    const n=Math.max(history.length,2)-1;
-    history.forEach((t,i)=>{
+    const n=Math.max(pts.length,2)-1;
+    pts.forEach((t,i)=>{
       const x=PL+pw*i/n;
       const y=PT+ph*(1-(t-mn)/rng);
       i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
     });
     ctx.stroke();
-    const lx=PL+pw*(history.length-1)/n;
-    const ly=PT+ph*(1-(history[history.length-1]-mn)/rng);
-    ctx.fillStyle='#7ec8e3';ctx.beginPath();ctx.arc(lx,ly,3.5,0,2*Math.PI);ctx.fill();
+    const lx=PL+pw*(pts.length-1)/n;
+    const ly=PT+ph*(1-(pts[pts.length-1]-mn)/rng);
+    ctx.fillStyle=color;ctx.beginPath();ctx.arc(lx,ly,3.5,0,2*Math.PI);ctx.fill();
     ctx.fillStyle='#444';ctx.font='10px monospace';ctx.textAlign='center';
-    ctx.fillText('\u2190 last '+Math.round(history.length*INTERVAL/1000)+'s',PL+pw/2,H-6);
+    ctx.fillText(label,PL+pw/2,H-6);
+  }
+  function drawGraph(){ drawCanvas('tempGraph',history,'\u2190 last '+Math.round(history.length*INTERVAL/1000)+'s','#7ec8e3'); }
+  let histPts=[];
+  function drawHistGraph(){
+    const label=histPts.length>0?'\u2190 '+histPts.length+' log entries':'';
+    drawCanvas('histGraph',histPts,label,'#a0d0a0');
+  }
+  function updateHistory(){
+    fetch('/history')
+      .then(r=>r.json())
+      .then(d=>{
+        histPts=d.map(e=>e.f);
+        drawHistGraph();
+      })
+      .catch(()=>{});
   }
   function cls(pct){
     if(pct < 10) return 'crit';
@@ -301,6 +418,8 @@ void handleRoot() {
   }
   update();
   setInterval(update, INTERVAL);
+  updateHistory();
+  setInterval(updateHistory, 60000);  // refresh history graph every 60s
 </script>
 </body>
 </html>
@@ -354,10 +473,66 @@ void handleNotFound() {
     "  GET /              dashboard\n"
     "  GET /data          JSON\n"
     "  GET /health        liveness\n"
+    "  GET /history.csv   raw CSV log (download)\n"
+    "  GET /history       JSON array of logged readings\n"
     "  GET /reboot        restart board\n"
     "  GET /ota-error     last OTA error\n"
     "  GET /update?url=   HTTP OTA\n"
   );
+}
+
+// GET /history.csv  — download the raw CSV (for backup / import)
+void handleHistoryCsv() {
+  if (!fsOK || !LittleFS.exists(LOG_FILE)) {
+    server.send(503, "text/plain", "Log not available\n");
+    return;
+  }
+  File f = LittleFS.open(LOG_FILE, "r");
+  server.sendHeader("Content-Disposition", "attachment; filename=\"history.csv\"");
+  server.sendHeader("Cache-Control", "no-store");
+  server.streamFile(f, "text/csv");
+  f.close();
+}
+
+// GET /history  — JSON array of logged readings (for dashboard graph)
+void handleHistory() {
+  if (!fsOK || !LittleFS.exists(LOG_FILE)) {
+    server.sendHeader("Cache-Control", "no-store");
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.send(200, "application/json", "[]\n");
+    return;
+  }
+  File f = LittleFS.open(LOG_FILE, "r");
+  String json = "[";
+  bool first = true;
+  bool headerSkipped = false;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.isEmpty()) continue;
+    if (!headerSkipped) { headerSkipped = true; continue; }  // skip CSV header
+    if (line.startsWith("-") || line.indexOf("SHUTDOWN") >= 0) continue;
+    // Parse: uptime_s,tempF,humidity,battV,battPct,rssi
+    int c1 = line.indexOf(',');
+    int c2 = line.indexOf(',', c1 + 1);
+    int c3 = line.indexOf(',', c2 + 1);
+    int c4 = line.indexOf(',', c3 + 1);
+    int c5 = line.indexOf(',', c4 + 1);
+    if (c1 < 0 || c2 < 0 || c3 < 0 || c4 < 0) continue;
+    if (!first) json += ",";
+    json += "{\"t\":" + line.substring(0, c1);
+    json += ",\"f\":" + line.substring(c1 + 1, c2);
+    json += ",\"h\":" + line.substring(c2 + 1, c3);
+    json += ",\"v\":" + line.substring(c3 + 1, c4);
+    json += ",\"p\":" + line.substring(c4 + 1, c5 < 0 ? line.length() : c5);
+    json += "}";
+    first = false;
+  }
+  f.close();
+  json += "]";
+  server.sendHeader("Cache-Control", "no-store");
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.send(200, "application/json", json);
 }
 
 // GET /reboot  — escape hatch if stuck
@@ -532,12 +707,14 @@ void initOTA() {
 }
 
 void startServer() {
-  server.on("/",          HTTP_GET, handleRoot);
-  server.on("/data",      HTTP_GET, handleData);
-  server.on("/health",    HTTP_GET, handleHealth);
-  server.on("/reboot",    HTTP_GET, handleReboot);
-  server.on("/ota-error", HTTP_GET, handleOtaError);
-  server.on("/update",    HTTP_GET, handleUpdate);
+  server.on("/",            HTTP_GET, handleRoot);
+  server.on("/data",        HTTP_GET, handleData);
+  server.on("/health",      HTTP_GET, handleHealth);
+  server.on("/history",     HTTP_GET, handleHistory);
+  server.on("/history.csv", HTTP_GET, handleHistoryCsv);
+  server.on("/reboot",      HTTP_GET, handleReboot);
+  server.on("/ota-error",   HTTP_GET, handleOtaError);
+  server.on("/update",      HTTP_GET, handleUpdate);
   server.onNotFound(handleNotFound);
   server.begin();
   Serial.print("[HTTP]    Server started on port ");
@@ -565,6 +742,7 @@ void setup() {
 
   initSHT45();
   initBattery();
+  initFS();
   connectWiFi();
   initOTA();
   startServer();
@@ -621,6 +799,19 @@ void loop() {
   latest.rssi     = latest.wifiUp ? WiFi.RSSI() : 0;
   latest.uptime   = now / 1000UL;
   latest.reading++;
+
+  // --- Under-voltage protection ---
+  // Check after a few readings to let the gauge stabilize (reading > 2 avoids boot glitch)
+  if (latest.reading > 2 && latest.battV > 0.5f && latest.battV < BATT_CUTOFF_V) {
+    undervoltageShutdown();  // does not return
+  }
+
+  // --- 15-minute data log ---
+  static uint32_t lastLog = 0;
+  if (now - lastLog >= LOG_INTERVAL_MS) {
+    lastLog = now;
+    logReading();
+  }
 
   if (!latest.wifiUp) WiFi.reconnect();
 

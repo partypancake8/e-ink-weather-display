@@ -6,13 +6,13 @@ Wi-Fi-connected temperature, humidity, and battery monitor running on an Adafrui
 
 ## Hardware
 
-| Component | Part |
-|---|---|
-| MCU | Adafruit Feather ESP32-S3 2MB PSRAM |
-| Temp / Humidity | Adafruit SHT45 (I²C) |
-| Battery gauge | MAX17048 (I²C — built into Feather) |
-| Status LED | NeoPixel (built into Feather, GPIO 33) |
-| Power | 3.7V LiPo via JST |
+| Component       | Part                                   |
+| --------------- | -------------------------------------- |
+| MCU             | Adafruit Feather ESP32-S3 2MB PSRAM    |
+| Temp / Humidity | Adafruit SHT45 (I²C)                   |
+| Battery gauge   | MAX17048 (I²C — built into Feather)    |
+| Status LED      | NeoPixel (built into Feather, GPIO 33) |
+| Power           | 3.7V LiPo via JST                      |
 
 ---
 
@@ -88,6 +88,7 @@ const char* WIFI_PASSWORD = "your_password";
 ```
 
 This single command:
+
 1. Compiles the firmware with `arduino-cli`
 2. Starts a local HTTP server to serve the binary
 3. Triggers OTA download on the board via `GET /update?url=...`
@@ -108,17 +109,17 @@ The board's NeoPixel turns solid blue during download, then flashes **purple 5×
 
 Open `http://10.0.0.151/` in any browser on the same network.
 
-| Field | Description |
-|---|---|
-| Temperature | Latest SHT45 reading (°F) |
-| Avg temp (10 rdgs) | Rolling 10-sample average |
-| Humidity | Relative humidity (%RH) |
-| Battery voltage | Raw cell voltage (V) |
-| Battery SOC | State of charge (%) with LOW / CRITICAL warnings |
-| Wi-Fi | Connection status + RSSI |
-| Uptime | Time since last boot |
-| Reading # | Total sensor readings since boot |
-| Graph | Live temperature chart — last 60 readings (~2 min) |
+| Field              | Description                                        |
+| ------------------ | -------------------------------------------------- |
+| Temperature        | Latest SHT45 reading (°F)                          |
+| Avg temp (10 rdgs) | Rolling 10-sample average                          |
+| Humidity           | Relative humidity (%RH)                            |
+| Battery voltage    | Raw cell voltage (V)                               |
+| Battery SOC        | State of charge (%) with LOW / CRITICAL warnings   |
+| Wi-Fi              | Connection status + RSSI                           |
+| Uptime             | Time since last boot                               |
+| Reading #          | Total sensor readings since boot                   |
+| Graph              | Live temperature chart — last 60 readings (~2 min) |
 
 The page polls `/data` every 2 seconds with no full-page reload.
 
@@ -126,31 +127,31 @@ The page polls `/data` every 2 seconds with no full-page reload.
 
 ## HTTP Endpoints
 
-| Endpoint | Description |
-|---|---|
-| `GET /` | Live HTML dashboard |
-| `GET /data` | JSON sensor blob |
-| `GET /health` | `200 OK` or `503 DEGRADED` (for uptime monitoring) |
-| `GET /reboot` | Force reboot the board |
-| `GET /ota-error` | Last OTA result string |
-| `GET /update?url=` | Trigger OTA from a URL |
+| Endpoint           | Description                                        |
+| ------------------ | -------------------------------------------------- |
+| `GET /`            | Live HTML dashboard                                |
+| `GET /data`        | JSON sensor blob                                   |
+| `GET /health`      | `200 OK` or `503 DEGRADED` (for uptime monitoring) |
+| `GET /reboot`      | Force reboot the board                             |
+| `GET /ota-error`   | Last OTA result string                             |
+| `GET /update?url=` | Trigger OTA from a URL                             |
 
 ---
 
 ## LED Status
 
-| Color / Pattern | State |
-|---|---|
-| White breathe | Booting |
-| Yellow blink | Wi-Fi connecting |
-| Double green flash | Wi-Fi connected |
-| Dim green heartbeat | Healthy (every ~1s) |
-| Brief blue flash | Sensor read (every 2s) |
-| Blue solid → bright | OTA downloading |
-| Purple × 5 → reboot | OTA success |
-| Orange blink | Wi-Fi lost |
-| Purple breathe | Battery low |
-| Red fast blink | Battery critical |
+| Color / Pattern     | State                  |
+| ------------------- | ---------------------- |
+| White breathe       | Booting                |
+| Yellow blink        | Wi-Fi connecting       |
+| Double green flash  | Wi-Fi connected        |
+| Dim green heartbeat | Healthy (every ~1s)    |
+| Brief blue flash    | Sensor read (every 2s) |
+| Blue solid → bright | OTA downloading        |
+| Purple × 5 → reboot | OTA success            |
+| Orange blink        | Wi-Fi lost             |
+| Purple breathe      | Battery low            |
+| Red fast blink      | Battery critical       |
 
 ---
 

@@ -89,6 +89,8 @@ struct SensorData {
   bool     wifiUp   = false;
 };
 static SensorData latest;
+static bool     g_sleepPending = false;  // set on button press; /data exposes it
+static uint32_t g_sleepAt      = 0;      // actual sleep after this millis()
 static volatile bool otaInProgress = false;  // set during HTTP OTA to pause sensors
 static          uint8_t otaBrightness = 20;    // written by OTA progress callback
 static          String  otaLastError  = "none"; // last OTA error, readable via /ota-error
@@ -299,20 +301,20 @@ void buttonSleep() {
   esp_deep_sleep_start();
 }
 
-// Debounced check — call every loop iteration.
+// Debounced check — triggers on falling edge (press).
+// Sets g_sleepPending for a 1.5 s window so the browser can
+// receive the "sleeping" flag in /data before the board goes under.
 void checkButton() {
-  static uint32_t pressStart = 0;
-  static bool     wasPressed  = false;
-  bool pressed = (digitalRead(BUTTON_PIN) == LOW);
-  if (pressed && !wasPressed) {
-    pressStart = millis();
-    wasPressed = true;
-  } else if (!pressed && wasPressed) {
-    wasPressed = false;
-    if (millis() - pressStart >= 50) {  // 50 ms debounce
-      buttonSleep();  // does not return
+  static bool lastState = HIGH;
+  bool cur = digitalRead(BUTTON_PIN);
+  if (lastState == HIGH && cur == LOW) {  // falling edge detected
+    delay(50);                             // debounce settle
+    if (digitalRead(BUTTON_PIN) == LOW && !g_sleepPending) {
+      g_sleepPending = true;
+      g_sleepAt      = millis() + 1500;  // sleep after 1.5 s
     }
   }
+  lastState = cur;
 }
 
 // ================================================================
@@ -346,9 +348,20 @@ void handleRoot() {
   .graph-wrap{margin-top:1.2rem;}
   .graph-label{font-size:.7rem;color:#555;margin:0.3rem 0 0.25rem;}
   canvas{width:100%;height:auto;display:block;border-radius:6px;background:#161616;}
+  #sleep-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);
+    justify-content:center;align-items:center;flex-direction:column;z-index:99;}
+  #sleep-overlay.active{display:flex;}
+  #sleep-overlay .icon{font-size:3rem;margin-bottom:.7rem;}
+  #sleep-overlay .msg{color:#e0e0e0;font-size:1.1rem;letter-spacing:.05em;text-align:center;}
+  #sleep-overlay .sub{color:#666;font-size:.8rem;margin-top:.5rem;}
 </style>
 </head>
 <body>
+<div id="sleep-overlay">
+  <div class="icon">💤</div>
+  <div class="msg">Device sleeping</div>
+  <div class="sub">Press BOOT button to wake</div>
+</div>
 <div class="card">
   <h2><span class="dot"></span>ESP32-S3 Feather — Live Sensor Data</h2>
   <table>
@@ -436,10 +449,24 @@ void handleRoot() {
     el.textContent = text;
     if(className){ el.className = className; }
   }
+  let sleepMode = false;
+  let pollTimer = null;
+  function showSleepOverlay(){
+    document.getElementById('sleep-overlay').classList.add('active');
+    document.getElementById('status').textContent = 'Device sleeping — press BOOT to wake';
+    document.querySelector('.dot').style.background='#555';
+    document.querySelector('.dot').style.animation='none';
+  }
   function update(){
     fetch('/data')
       .then(r => r.json())
       .then(d => {
+        if(d.sleeping && !sleepMode){
+          sleepMode = true;
+          clearInterval(pollTimer);
+          // One final data render, then show overlay after the blink window
+          setTimeout(showSleepOverlay, 1600);
+        }
         set('tempF',   d.tempF.toFixed(1)    + ' °F');
         set('tempAvg', d.tempFAvg.toFixed(1)  + ' °F');
         set('humid',   d.humidity.toFixed(1) + ' %RH');
@@ -454,15 +481,19 @@ void handleRoot() {
         history.push(d.tempF);
         if(history.length > MAX_PTS) history.shift();
         drawGraph();
-        document.getElementById('status').textContent =
-          'Last updated: ' + new Date().toLocaleTimeString();
+        if(!sleepMode)
+          document.getElementById('status').textContent =
+            'Last updated: ' + new Date().toLocaleTimeString();
       })
       .catch(() => {
-        document.getElementById('status').textContent = 'Fetch failed — retrying...';
+        if(!sleepMode)
+          document.getElementById('status').textContent = 'Device offline — sleeping or unreachable';
+        else
+          showSleepOverlay();
       });
   }
   update();
-  setInterval(update, INTERVAL);
+  pollTimer = setInterval(update, INTERVAL);
   updateHistory();
   setInterval(updateHistory, 60000);  // refresh history graph every 60s
 </script>
@@ -489,7 +520,8 @@ void handleData() {
   json += "  \"wifiUp\":   "; json += (latest.wifiUp ? "true" : "false");   json += ",\n";
   json += "  \"rssi\":     "; json += String(latest.rssi);      json += ",\n";
   json += "  \"uptime\":   "; json += String(latest.uptime);    json += ",\n";
-  json += "  \"reading\":  "; json += String(latest.reading);   json += "\n";
+  json += "  \"reading\":  "; json += String(latest.reading);   json += ",\n";
+  json += "  \"sleeping\": "; json += (g_sleepPending ? "true" : "false"); json += "\n";
   json += "}\n";
   server.sendHeader("Cache-Control", "no-store");          // always fresh
   server.sendHeader("Connection", "close");                // don't stall keep-alive
@@ -814,6 +846,11 @@ void loop() {
   // ---- LED ----
   updateLed();
   checkButton();
+
+  // ---- Button sleep (deferred so browser can see sleeping:true in /data) ----
+  if (g_sleepPending && millis() >= g_sleepAt) {
+    buttonSleep();  // does not return
+  }
 
   // ---- Sensor read every READ_INTERVAL_MS ----
   static uint32_t lastRead = 0;

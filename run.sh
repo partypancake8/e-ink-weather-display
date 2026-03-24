@@ -1,8 +1,13 @@
 #!/bin/zsh
 # ============================================================
-# OTA flash script for ESP32-S3 Feather
-# Usage: ./run.sh [sketch_dir]
-# Default sketch: phase6_http_server
+# Compile + OTA Flash — ESP32-S3 Feather
+# ============================================================
+# Usage: ./run.sh [path/to/sketch_dir]
+#
+# This is the ONE command to build and deploy firmware.
+# Always run this manually — never delegate to automation.
+#   ./run.sh                        → builds firmware/phase6_http_server
+#   ./run.sh firmware/my_sketch     → builds a specific sketch
 # ============================================================
 
 BOARD_IP="10.0.0.151"
@@ -11,7 +16,7 @@ HTTP_PORT="8080"
 FQBN="esp32:esp32:adafruit_feather_esp32s3:CDCOnBoot=cdc,PartitionScheme=min_spiffs"
 BUILD_DIR="/tmp/esp32build"
 
-SKETCH_DIR="${1:-$(dirname "$0")/phase6_http_server}"
+SKETCH_DIR="${1:-$(dirname "$0")/firmware/phase6_http_server}"
 SKETCH_NAME="$(basename "$SKETCH_DIR").ino.bin"
 
 echo "========================================"
